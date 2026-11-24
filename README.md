@@ -16,6 +16,17 @@
 - 学院月报：按学院、课程班、活动类型、助教四个维度透视汇总，仅纳入已审批工时，可下载 JSON 快照。
 - JWT 三角色：`ta` 助教、`teacher` 任课教师、`college_admin` 学院教务管理员。
 - 审计与限流：审批、复核、月报发布均写入审计日志，API 对单用户请求进行简单窗口限流。
+- 财务名册出账：学院月报按 `finance_roster` 出账，而不是按助教姓名合并。同名助教是两条名册记录，靠 `staff_no` 区分；同一自然人的多个校内账号可以认领到同一名册人员。
+
+## 学院月报的财务名册口径
+
+月报页（`#/report`）把「已批工时 → 财务名册人员」的归属完整展开，供财务逐笔核对。
+
+- 管理员按「学院 + 月份」认领：`POST /reports/claims` 把某个 `ta` 账号归属到一名名册人员；同一账号在同月只能有一条生效认领，改归属需先撤销。
+- 未认领的已批工时进入**挂起清单**，不计入任何出账行；只要还有挂起，`POST /reports/monthly/publish` 返回 `409` 并列出挂起明细，清完才能发布。
+- 撤销误认领用 `POST /reports/claims/{claim_id}/revoke`，按 `claim_id` 精确定位，可带 `expected_version` 做乐观校验。撤销失败后重试只会命中这条原认领（返回 `already_revoked`），不会覆盖之后补认的新归属。
+- 认领变更与发布都对 `(department, month)` 取事务级 advisory lock，因此整份月报始终按同一套归属出账，不会出现一半旧、一半新的快照。
+- 月报响应含 `records`（逐笔已批工时的归属，含挂起）、`suspended`（挂起清单）、`totals`、`attribution_hash`；发布快照同时保存归属哈希与挂起/认领清单，便于事后比对。助教调用时自动去掉账号邮箱等明细。
 
 ## 主流程与异常分支
 
@@ -24,7 +35,7 @@
 - 签到时间必须落在课程排班窗口前后 30 分钟的容差内，且签到日期必须与课程排班星期匹配。
 - 签到与排班冲突时，记录状态为 `manual_review`，教师不能直接审批，必须由学院管理员复核后再进入审批。
 - 未审核工时的 `validated_hours` 不计入学院月报。
-- 课程班月报只能由学院管理员生成，发布前会重新按数据库中的 `approved` 记录计算。
+- 课程班月报只能由学院管理员生成，发布前会重新按数据库中的 `approved` 记录与认领归属计算。
 
 ## 演示账号
 
@@ -34,7 +45,9 @@
 |---|---|---|
 | `ta@donglan.edu` | 助教 `ta` | 查看课程班、签到、创建和提交自己的工时填报 |
 | `teacher@donglan.edu` | 教师 `teacher` | 查看所授课程班、审批或退回工时、处理待复核记录 |
-| `admin@donglan.edu` | 学院管理员 `college_admin` | 维护排班、人工复核冲突、生成和发布学院月报 |
+| `admin@donglan.edu` | 学院管理员 `college_admin` | 维护排班、人工复核冲突、认领财务名册、生成和发布学院月报 |
+
+演示数据额外包含 `ta2@donglan.edu`（与 `ta` 同一自然人的第二个校内账号）、`ta3@donglan.edu`（同名不同人）和 `ta4@donglan.edu`（未认领，制造挂起）。财务名册 `F-001`/`F-002` 是两条同名记录。
 
 ## 技术栈与服务
 
@@ -65,9 +78,10 @@ docker compose down -v --remove-orphans
 ## 目录说明
 
 - `backend/src/models` 领域表结构与数据库初始化
-- `backend/src/services` 工时校验、月报透视、审计和认证
-- `backend/src/routes` 认证、课程班、工时记录、月报接口
-- `frontend/src/pages` 四个业务页面
+- `backend/migrations` 表结构迁移（`002_finance_roster.sql` 引入财务名册与月度认领）
+- `backend/src/services` 工时校验、财务名册归属、审计和认证
+- `backend/src/routes` 认证、课程班、工时记录、月报与认领接口
+- `frontend/src/pages` 业务页面（`report.js` 为财务名册出账月报）
 - `backend/scripts/seed_demo.py` 幂等演示数据
 
 ## 共享枚举出现位置
@@ -78,7 +92,7 @@ docker compose down -v --remove-orphans
 
 ## 复现算法
 
-工时有效值由 `min(签到签退实际分钟 / 60, 助教填报小时, 课程班单次口径上限)` 计算，四舍五入到 0.25 小时。排班冲突条件、缺签条件和有效小时口径写在 `backend/src/services/hour_policy.py`。月报透视按 `department × course_class × activity_type × ta` 聚合已审批记录，结果带 `approved_record_count`，便于财务复核。
+工时有效值由 `min(签到签退实际分钟 / 60, 助教填报小时, 课程班单次口径上限)` 计算，四舍五入到 0.25 小时。排班冲突条件、缺签条件和有效小时口径写在 `backend/src/services/hour_policy.py`。财务名册归属、挂起判定与快照哈希写在 `backend/src/services/roster.py`：已批工时按认领映射到 `finance_roster`，未认领进入挂起；`attribution_hash` 由每笔 `(record_id, roster_id, claim_id, claim_version)` 计算，发布快照与页面核对共用同一份哈希。
 
 ## License
 

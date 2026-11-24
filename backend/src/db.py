@@ -4,9 +4,18 @@ import psycopg
 from psycopg.rows import dict_row
 from .config import DATABASE_URL
 
+_ISOLATION_LEVELS = {
+    "READ COMMITTED": psycopg.IsolationLevel.READ_COMMITTED,
+    "REPEATABLE READ": psycopg.IsolationLevel.REPEATABLE_READ,
+    "SERIALIZABLE": psycopg.IsolationLevel.SERIALIZABLE,
+}
+
+
 @contextmanager
-def get_conn():
+def get_conn(isolation_level=None):
     conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    if isolation_level is not None:
+        conn.isolation_level = _ISOLATION_LEVELS[isolation_level]
     try:
         yield conn
         conn.commit()
@@ -17,7 +26,7 @@ def get_conn():
         conn.close()
 
 def init_db():
-    migration = Path(__file__).resolve().parents[1] / "migrations/001_schema.sql"
-    sql = migration.read_text()
+    migrations_dir = Path(__file__).resolve().parents[1] / "migrations"
     with get_conn() as conn:
-        conn.execute(sql)
+        for migration in sorted(migrations_dir.glob("*.sql")):
+            conn.execute(migration.read_text())
